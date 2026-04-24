@@ -11,13 +11,12 @@ import json
 from contextlib import asynccontextmanager # <--- Add this import
 from fpdf import FPDF
 from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
+load_dotenv()
 
-# Create a folder to store the PDFs
+# Create a folder to store the PDFs.
 DOCS_OUTPUT_DIR = "generated_docs"
 os.makedirs(DOCS_OUTPUT_DIR, exist_ok=True)
-
-# Tell FastAPI to serve files from this folder at the URL /download
-app.mount("/download", StaticFiles(directory=DOCS_OUTPUT_DIR), name="download")
 
 
 # --- 1. DEFINE THE LIFESPAN ---
@@ -34,17 +33,26 @@ async def lifespan(app: FastAPI):
 
 # --- 2. INITIALIZE FASTAPI WITH LIFESPAN ---
 app = FastAPI(title="InnoGuard AI Backend", lifespan=lifespan)
+# Tell FastAPI to serve files from this folder at the URL /download
+app.mount("/download", StaticFiles(directory=DOCS_OUTPUT_DIR), name="download")
 
+# --- 4. CONFIGURATION & CLIENTS ---
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ZAI_API_KEY = os.getenv("ZAI_API_KEY")
+
+if not OPENAI_API_KEY or not ZAI_API_KEY:
+    raise ValueError("Missing API Keys! Please check your .env file.")
 
 # --- 1. CONFIGURATION & CLIENTS ---
 # Using OpenAI for embeddings as per your tech stack
-client_embeddings = OpenAI(api_key="") 
+client_embeddings = OpenAI(api_key=OPENAI_API_KEY) 
 
 # Using Z.AI GLM (ILMU) for Logic - Configured as per your Guide Book
 # The guide says it's Anthropic-compatible via api.ilmu.ai
 zai_client = OpenAI(
     base_url="https://api.ilmu.ai/v1", 
-    api_key=""
+    api_key=ZAI_API_KEY,
+    timeout=600.0
 )
 
 # Initialize Vector DB (Local)
@@ -264,11 +272,15 @@ async def generate_idea(req: IdeaRequest):
         "Return ONLY a JSON object with the keys: 'title', 'description', and 'technical_innovation'."
     )
 
-    res1 = zai_client.chat.completions.create(
-        model="ilmu-glm-5.1",
-        messages=[{"role": "user", "content": creative_prompt}],
-        response_format={ "type": "json_object" }
-    )
+    #res1 = zai_client.chat.completions.create(
+    #    model="ilmu-glm-5.1",
+    #    messages=[{"role": "user", "content": creative_prompt}]
+    #)
+    res1 = client_embeddings.chat.completions.create(
+                model="gpt-4o-mini", # Reliable and fast
+                messages=[{"role": "user", "content": creative_prompt}],
+                response_format={ "type": "json_object" }
+            )
     draft_content = json.loads(res1.choices[0].message.content)
     draft_text_for_embedding = f"{draft_content['title']}. {draft_content['description']} {draft_content['technical_innovation']}"
     # 4. INTERNAL LOOP (VERIFICATION)
@@ -285,10 +297,10 @@ async def generate_idea(req: IdeaRequest):
     similarity_score = round((1 - distance) * 100, 2)
 
     # 5. GLM PROMPT 2: REFINEMENT (The "Self-Correction" Intelligence)
-    final_content = draft_content
+    final_idea = draft_content
     if similarity_score > 50: # If it's too similar to an existing patent
         refinement_prompt = (
-            f"Your suggested idea: {json.dumps(draft_idea)}\n\n"
+            f"Your suggested idea: {json.dumps(draft_content)}\n\n"
             f"CRITIQUE: This idea is {similarity_score}% similar to an existing patent: '{top_match_text}'.\n"
             f"TASK: Modify the technical specs of your idea to avoid infringement while keeping the focus on {req.focus_area}. "
             "Ensure the final version is distinct. Return the same Title/Description/Innovation format."
@@ -298,11 +310,15 @@ async def generate_idea(req: IdeaRequest):
             "Technical Innovation: [What makes it unique?]"
             "Return ONLY a JSON object with the keys: 'title', 'description', and 'technical_innovation'."
         )
-        res2 = zai_client.chat.completions.create(
-            model="ilmu-glm-5.1",
-            messages=[{"role": "user", "content": refinement_prompt}],
-            response_format={ "type": "json_object" }
-        )
+        #res2 = zai_client.chat.completions.create(
+        #    model="ilmu-glm-5.1",
+         #   messages=[{"role": "user", "content": refinement_prompt}]
+        #)
+        res2 = client_embeddings.chat.completions.create(
+                model="gpt-4o-mini", # Reliable and fast
+                messages=[{"role": "user", "content": refinement_prompt}],
+                response_format={ "type": "json_object" }
+            )
         final_idea = json.loads(res2.choices[0].message.content)
 
     # 6. RETURN CLEAN DATA
@@ -367,12 +383,15 @@ async def evaluate_idea(req: EvaluateRequest):
     )
     
     # 4. CALL GLM
-    res = zai_client.chat.completions.create(
-        model="ilmu-glm-5.1",
-        messages=[{"role": "user", "content": prompt}],
-        response_format={ "type": "json_object" } # Tells the GLM to be strict with JSON
-    )
-    
+    #res = zai_client.chat.completions.create(
+     #   model="ilmu-glm-5.1",
+     #   messages=[{"role": "user", "content": prompt}]
+    #)
+    res = client_embeddings.chat.completions.create(
+                model="gpt-4o-mini", # Reliable and fast
+                messages=[{"role": "user", "content": prompt}],
+                response_format={ "type": "json_object" }
+            )
     # Parse the GLM response
     analysis = json.loads(res.choices[0].message.content)
     
@@ -402,10 +421,14 @@ async def generate_docs(req: DocRequest):
         "Structure it with clear headings for 'Description' and 'Claims'."
     )
     
-    res_patent = zai_client.chat.completions.create(
-        model="ilmu-glm-5.1",
-        messages=[{"role": "user", "content": patent_prompt}]
-    )
+   # res_patent = zai_client.chat.completions.create(
+    #    model="ilmu-glm-5.1",
+     #   messages=[{"role": "user", "content": patent_prompt}]
+   # )
+    res_patent = client_embeddings.chat.completions.create(
+                model="gpt-4o-mini", # Reliable and fast
+                messages=[{"role": "user", "content": patent_prompt}]
+            )
     patent_content = res_patent.choices[0].message.content
 
     # --- 2. GLM LOGIC: DRAFT THE NDA ---
@@ -415,10 +438,14 @@ async def generate_docs(req: DocRequest):
         "Include standard clauses for Confidentiality, Duration (5 years), and Governing Law (Malaysia)."
     )
     
-    res_nda = zai_client.chat.completions.create(
-        model="ilmu-glm-5.1",
-        messages=[{"role": "user", "content": nda_prompt}]
-    )
+    #res_nda = zai_client.chat.completions.create(
+     #   model="ilmu-glm-5.1",
+      #  messages=[{"role": "user", "content": nda_prompt}]
+   # )
+    res_nda = client_embeddings.chat.completions.create(
+                model="gpt-4o-mini", # Reliable and fast
+                messages=[{"role": "user", "content": nda_prompt}]
+            )
     nda_content = res_nda.choices[0].message.content
 
     # --- 3. PDF GENERATION LOGIC ---
