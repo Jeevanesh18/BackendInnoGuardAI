@@ -4,7 +4,6 @@ import numpy as np
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from sklearn.cluster import KMeans
 import chromadb
 from collections import Counter
 from openai import OpenAI
@@ -224,7 +223,7 @@ async def generate_idea(req: IdeaRequest):
     # We ask ChromaDB for everything matching the user's category
     category_data = collection.get(
         where={"category": req.category},
-        include=['metadatas']
+        include=['metadatas', 'documents']
     )
 
     if not category_data['metadatas']:
@@ -244,7 +243,11 @@ async def generate_idea(req: IdeaRequest):
         m['sub_group_label'] for m in category_data['metadatas'] 
         if m['sub_group'] == whitespace_id
     )
-
+    existing_patents = [
+        doc for doc, meta in zip(category_data['documents'], category_data['metadatas'])
+        if meta['sub_group'] == whitespace_id
+    ]
+    context_text = "\n".join([f"- {p}" for p in existing_patents])
     # 3. GLM PROMPT 1: CREATIVE GENERATION
     # We combine the Industry + Whitespace + User's Focus Area
     creative_prompt = (
@@ -252,22 +255,25 @@ async def generate_idea(req: IdeaRequest):
         f"Industry: {req.category}\n"
         f"Under-served Market (Whitespace): {whitespace_label}\n"
         f"User's Specific Focus: {req.focus_area}\n\n"
+        f"EXISTING PATENTS IN THIS WHITESPACE TO AVOID:\n{context_text}\n\n"
         "Task: Suggest a unique, highly technical product idea that fits this whitespace. "
         "Return the response in this format:\n"
         "Title: [Name]\n"
         "Description: [2 sentences]\n"
         "Technical Innovation: [What makes it unique?]"
+        "Return ONLY a JSON object with the keys: 'title', 'description', and 'technical_innovation'."
     )
 
     res1 = zai_client.chat.completions.create(
         model="ilmu-glm-5.1",
-        messages=[{"role": "user", "content": creative_prompt}]
+        messages=[{"role": "user", "content": creative_prompt}],
+        response_format={ "type": "json_object" }
     )
-    draft_content = res1.choices[0].message.content
-
+    draft_content = json.loads(res1.choices[0].message.content)
+    draft_text_for_embedding = f"{draft_content['title']}. {draft_content['description']} {draft_content['technical_innovation']}"
     # 4. INTERNAL LOOP (VERIFICATION)
     # Convert the draft into a vector to check if it's ACTUALLY unique
-    emb_res = client_embeddings.embeddings.create(input=draft_content, model="text-embedding-3-small")
+    emb_res = client_embeddings.embeddings.create(input=draft_text_for_embedding, model="text-embedding-3-small")
     search_res = collection.query(
         query_embeddings=[emb_res.data[0].embedding], 
         n_results=1
@@ -282,31 +288,30 @@ async def generate_idea(req: IdeaRequest):
     final_content = draft_content
     if similarity_score > 50: # If it's too similar to an existing patent
         refinement_prompt = (
-            f"Your suggested idea: {draft_content}\n\n"
+            f"Your suggested idea: {json.dumps(draft_idea)}\n\n"
             f"CRITIQUE: This idea is {similarity_score}% similar to an existing patent: '{top_match_text}'.\n"
             f"TASK: Modify the technical specs of your idea to avoid infringement while keeping the focus on {req.focus_area}. "
             "Ensure the final version is distinct. Return the same Title/Description/Innovation format."
+            "Return the response in this format:\n"
+            "Title: [Name]\n"
+            "Description: [2 sentences]\n"
+            "Technical Innovation: [What makes it unique?]"
+            "Return ONLY a JSON object with the keys: 'title', 'description', and 'technical_innovation'."
         )
         res2 = zai_client.chat.completions.create(
             model="ilmu-glm-5.1",
-            messages=[{"role": "user", "content": refinement_prompt}]
+            messages=[{"role": "user", "content": refinement_prompt}],
+            response_format={ "type": "json_object" }
         )
-        final_content = res2.choices[0].message.content
+        final_idea = json.loads(res2.choices[0].message.content)
 
-    # 6. PARSE THE RESULT FOR PROPER JSON RETURN
-    # This turns the GLM text into a clean JSON object for your frontend
-    lines = final_content.split('\n')
-    idea_dict = {"title": "", "description": "", "technical_innovation": ""}
-    for line in lines:
-        if "Title:" in line: idea_dict["title"] = line.replace("Title:", "").strip()
-        if "Description:" in line: idea_dict["description"] = line.replace("Description:", "").strip()
-        if "Technical Innovation:" in line: idea_dict["technical_innovation"] = line.replace("Technical Innovation:", "").strip()
-
+    # 6. RETURN CLEAN DATA
+    # FIX: We deleted the manual string parsing (lines.split('\n')) because 'final_idea' is already a clean JSON dictionary!
     return {
         "status": "success",
         "whitespace_found": whitespace_label,
-        "idea": idea_dict,
-        "verification": f"Idea cross-referenced. Found {similarity_score}% similarity to existing tech. Optimization loop applied."
+        "idea": final_idea,
+        "verification": f"Optimization loop applied. Previous similarity was {similarity_score}%." if similarity_score > 50 else f"First draft highly unique. Highest similarity match was only {similarity_score}%."
     }
 
 
@@ -426,7 +431,8 @@ async def generate_docs(req: DocRequest):
         pdf.ln(10)
         # Add the Content
         pdf.set_font("helvetica", "", 11)
-        pdf.multi_cell(0, 10, body)
+        safe_body = body.encode('latin-1', 'replace').decode('latin-1')
+        pdf.multi_cell(0, 10, safe_body)
         
         file_path = os.path.join(DOCS_OUTPUT_DIR, filename)
         pdf.output(file_path)
