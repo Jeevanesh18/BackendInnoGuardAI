@@ -2,7 +2,7 @@ import os
 import uuid
 import numpy as np
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import chromadb
 from collections import Counter
@@ -411,7 +411,7 @@ async def evaluate_idea(req: EvaluateRequest):
     }
 
 @app.post("/api/v1/generate-docs")
-async def generate_docs(req: DocRequest):
+async def generate_docs(req: DocRequest, request: Request):
     # --- 1. GLM LOGIC: DRAFT THE PATENT CONTENT ---
     patent_prompt = (
         f"You are a Malaysian Intellectual Property Lawyer. "
@@ -474,7 +474,8 @@ async def generate_docs(req: DocRequest):
 
     # --- 4. RETURN THE REAL DOWNLOAD LINKS ---
     # Assuming your server runs on localhost:8000
-    base_url = "http://localhost:8000/download" 
+    server_url = str(request.base_url).rstrip('/') 
+    base_url = f"{server_url}/download" 
     
     return {
         "status": "documents_generated",
