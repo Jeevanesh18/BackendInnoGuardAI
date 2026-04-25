@@ -72,7 +72,7 @@ class EvaluateRequest(BaseModel):
 class DocRequest(BaseModel):
     final_idea: str
     user_name: str
-    doc_type: str
+    doc_type: str = "patent"
     NDA_optional: Optional[str] = "NDA_FORM"
 
 DISTANCE_THRESHOLD = 0.5 
